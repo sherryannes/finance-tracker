@@ -99,6 +99,7 @@ class TransactionOut(TransactionBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    receipt_url: str | None = None
     created_at: datetime
 
 

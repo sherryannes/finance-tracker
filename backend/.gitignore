@@ -19,6 +19,9 @@ venv/
 *.db
 *.sqlite3
 
+# Uploaded receipts
+uploads/
+
 # Node / frontend
 node_modules/
 .next/

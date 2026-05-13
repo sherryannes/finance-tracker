@@ -96,6 +96,7 @@ class Transaction(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     occurred_on: Mapped[date] = mapped_column(Date, index=True)
+    receipt_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     owner: Mapped["User"] = relationship(back_populates="transactions")

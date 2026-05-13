@@ -1,9 +1,19 @@
 """Transaction CRUD + statistics endpoints."""
+import uuid
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +29,20 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
+
+# Where uploaded receipts live on disk. Must match the mount in main.py.
+UPLOADS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
+
+# Limit uploads to images, with a reasonable size cap to avoid disk blowups.
+ALLOWED_RECEIPT_TYPES = {
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "application/pdf",
+}
+MAX_RECEIPT_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def _verify_account(account_id: int, user: User, db: Session) -> Account:
@@ -138,8 +162,87 @@ def delete_transaction(
     if account:
         delta = txn.amount if txn.type == TransactionType.income else -txn.amount
         account.balance = (account.balance or Decimal("0")) - delta
+
+    # Clean up the on-disk receipt if one was attached.
+    if txn.receipt_url:
+        _delete_receipt_file(txn.receipt_url)
+
     db.delete(txn)
     db.commit()
+
+
+# ---------- Receipts ----------
+def _delete_receipt_file(receipt_url: str) -> None:
+    """Best-effort delete of the on-disk receipt referenced by `/uploads/<name>`."""
+    if not receipt_url.startswith("/uploads/"):
+        return
+    filename = receipt_url[len("/uploads/"):]
+    path = UPLOADS_DIR / filename
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+@router.post("/{txn_id}/receipt", response_model=TransactionOut)
+async def upload_receipt(
+    txn_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Attach a receipt image (or PDF) to a transaction."""
+    txn = _get_owned_txn(txn_id, user, db)
+
+    if file.content_type not in ALLOWED_RECEIPT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Unsupported file type. Allowed: JPEG, PNG, WebP, HEIC, or PDF."
+            ),
+        )
+
+    # Read into memory once so we can size-check before writing to disk.
+    data = await file.read()
+    if len(data) > MAX_RECEIPT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Receipt is too large (max 5 MB).",
+        )
+
+    # Pick a safe filename: user_id and txn_id help debugging; uuid prevents
+    # collisions; we keep the original extension.
+    ext = Path(file.filename or "").suffix.lower() or ".bin"
+    safe_name = f"u{user.id}_t{txn.id}_{uuid.uuid4().hex}{ext}"
+    dest = UPLOADS_DIR / safe_name
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    dest.write_bytes(data)
+
+    # If the transaction already had a receipt, remove the old file.
+    if txn.receipt_url:
+        _delete_receipt_file(txn.receipt_url)
+
+    txn.receipt_url = f"/uploads/{safe_name}"
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
+@router.delete("/{txn_id}/receipt", response_model=TransactionOut)
+def delete_receipt(
+    txn_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Remove the receipt attached to a transaction."""
+    txn = _get_owned_txn(txn_id, user, db)
+    if txn.receipt_url:
+        _delete_receipt_file(txn.receipt_url)
+        txn.receipt_url = None
+        db.commit()
+        db.refresh(txn)
+    return txn
 
 
 @router.get("/stats/monthly", response_model=MonthlyStats)

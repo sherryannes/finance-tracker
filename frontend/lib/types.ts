@@ -35,6 +35,7 @@ export interface Transaction {
   amount: string;
   note: string | null;
   occurred_on: string; // YYYY-MM-DD
+  receipt_url: string | null; // e.g. "/uploads/u1_t5_abcd.jpg"
   created_at: string;
 }
 

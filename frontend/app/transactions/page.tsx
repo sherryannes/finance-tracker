@@ -10,13 +10,16 @@ import {
   ArrowDownCircle,
   ArrowUpCircle,
   Download,
+  Paperclip,
   Pencil,
   Plus,
   Trash2,
+  Upload,
   Wallet,
+  X,
 } from 'lucide-react';
 
-import { api } from '@/lib/api';
+import { api, receiptHref } from '@/lib/api';
 import { isAuthenticated } from '@/lib/auth';
 import {
   ACCOUNT_TYPE_LABELS,
@@ -367,6 +370,18 @@ export default function TransactionsPage() {
                                 {category.name}
                               </span>
                             )}
+                            {txn.receipt_url && (
+                              <a
+                                href={receiptHref(txn.receipt_url) ?? '#'}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-muted hover:bg-muted/70 text-muted-foreground hover:text-foreground"
+                                title="View receipt"
+                              >
+                                <Paperclip className="h-3 w-3" />
+                                Receipt
+                              </a>
+                            )}
                           </div>
                           <p className="text-xs text-muted-foreground">
                             {txn.occurred_on}
@@ -504,6 +519,11 @@ function TransactionFormDialog({
   const isEdit = transaction !== null;
   const [serverError, setServerError] = useState<string | null>(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [pendingReceiptFile, setPendingReceiptFile] = useState<File | null>(
+    null,
+  );
+  // Bumped when the existing receipt is removed, so the UI re-renders.
+  const [, setReceiptVersion] = useState(0);
   const today = new Date().toISOString().slice(0, 10);
 
   const defaultValues: TxnFormData = transaction
@@ -572,6 +592,19 @@ function TransactionFormDialog({
         const res = await api.post<Transaction>('/api/transactions', payload);
         saved = res.data;
       }
+
+      // If the user picked a new receipt file, upload it now (as a second step).
+      if (pendingReceiptFile) {
+        const formData = new FormData();
+        formData.append('file', pendingReceiptFile);
+        const uploadRes = await api.post<Transaction>(
+          `/api/transactions/${saved.id}/receipt`,
+          formData,
+          { headers: { 'Content-Type': 'multipart/form-data' } },
+        );
+        saved = uploadRes.data;
+      }
+
       onSuccess(saved);
     } catch (err: unknown) {
       const message =
@@ -752,6 +785,26 @@ function TransactionFormDialog({
           />
         </div>
 
+        {/* Receipt section */}
+        <ReceiptField
+          transaction={transaction}
+          pendingFile={pendingReceiptFile}
+          onSelectFile={setPendingReceiptFile}
+          onRemoveExisting={async () => {
+            if (!transaction) return;
+            try {
+              await api.delete(`/api/transactions/${transaction.id}/receipt`);
+              // Mutate locally so the UI updates without a full reload.
+              (transaction as Transaction).receipt_url = null;
+              // Force a re-render by toggling a state.
+              setReceiptVersion((v) => v + 1);
+            } catch (err) {
+              console.error(err);
+              alert('Failed to remove receipt.');
+            }
+          }}
+        />
+
         {serverError && (
           <p className="text-sm text-destructive">{serverError}</p>
         )}
@@ -874,5 +927,118 @@ function InlineCreateCategoryDialog({
         </DialogFooter>
       </form>
     </DialogContent>
+  );
+}
+
+// ---------- Receipt field inside the transaction form ----------
+function ReceiptField({
+  transaction,
+  pendingFile,
+  onSelectFile,
+  onRemoveExisting,
+}: {
+  transaction: Transaction | null;
+  pendingFile: File | null;
+  onSelectFile: (file: File | null) => void;
+  onRemoveExisting: () => void;
+}) {
+  // Build a preview URL for the freshly picked file, then clean it up.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingFile) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(pendingFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pendingFile]);
+
+  const existingHref = transaction?.receipt_url
+    ? receiptHref(transaction.receipt_url)
+    : null;
+
+  return (
+    <div className="space-y-2">
+      <Label>Receipt (optional)</Label>
+
+      {/* Existing receipt — shown only when editing and not replaced. */}
+      {existingHref && !pendingFile && (
+        <div className="flex items-center gap-3 border rounded-md p-2 bg-muted/30">
+          <a
+            href={existingHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 text-sm hover:underline"
+          >
+            <Paperclip className="h-4 w-4" />
+            View current receipt
+          </a>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="ml-auto text-muted-foreground hover:text-destructive"
+            onClick={onRemoveExisting}
+          >
+            <X className="h-4 w-4 mr-1" />
+            Remove
+          </Button>
+        </div>
+      )}
+
+      {/* Preview of a newly picked file before save */}
+      {pendingFile && (
+        <div className="flex items-center gap-3 border rounded-md p-2 bg-muted/30">
+          {previewUrl && pendingFile.type.startsWith('image/') ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={previewUrl}
+              alt="Preview"
+              className="h-16 w-16 object-cover rounded"
+            />
+          ) : (
+            <Paperclip className="h-8 w-8 text-muted-foreground" />
+          )}
+          <div className="min-w-0 text-sm">
+            <p className="font-medium truncate">{pendingFile.name}</p>
+            <p className="text-xs text-muted-foreground">
+              {(pendingFile.size / 1024).toFixed(0)} KB — will upload on save
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="ml-auto text-muted-foreground hover:text-destructive"
+            onClick={() => onSelectFile(null)}
+          >
+            <X className="h-4 w-4 mr-1" />
+            Remove
+          </Button>
+        </div>
+      )}
+
+      {/* File picker */}
+      {!pendingFile && (
+        <label className="flex items-center justify-center gap-2 border-2 border-dashed rounded-md py-3 px-4 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 cursor-pointer transition-colors">
+          <Upload className="h-4 w-4" />
+          {existingHref ? 'Replace receipt' : 'Upload a receipt'}
+          <input
+            type="file"
+            accept="image/*,application/pdf"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onSelectFile(file);
+              e.target.value = '';
+            }}
+          />
+        </label>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Image (JPEG/PNG/WebP/HEIC) or PDF, up to 5 MB.
+      </p>
+    </div>
   );
 }

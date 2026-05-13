@@ -94,3 +94,4 @@ See [ROADMAP.md](./ROADMAP.md) for the development plan with milestone-by-milest
 ## 📄 License
 
 MIT
+# finance-tracker

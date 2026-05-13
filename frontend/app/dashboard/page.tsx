@@ -29,6 +29,7 @@ import { isAuthenticated } from '@/lib/auth';
 import {
   ACCOUNT_TYPE_LABELS,
   type Account,
+  type Category,
   type Transaction,
 } from '@/lib/types';
 
@@ -58,6 +59,7 @@ export default function DashboardPage() {
   const router = useRouter();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,10 +71,12 @@ export default function DashboardPage() {
     Promise.all([
       api.get<Account[]>('/api/accounts'),
       api.get<Transaction[]>('/api/transactions', { params: { limit: 500 } }),
+      api.get<Category[]>('/api/categories'),
     ])
-      .then(([acctRes, txnRes]) => {
+      .then(([acctRes, txnRes, catRes]) => {
         setAccounts(acctRes.data);
         setTransactions(txnRes.data);
+        setCategories(catRes.data);
       })
       .catch((err) =>
         setError(err?.message ?? 'Failed to load dashboard data'),
@@ -134,19 +138,30 @@ export default function DashboardPage() {
     });
   }, [transactions]);
 
-  // Spending breakdown by account — for the pie chart (current month only).
-  const spendingByAccount = useMemo(() => {
-    const map = new Map<number, number>();
+  // Spending breakdown by category — for the pie chart (current month only).
+  // Transactions without a category fall into an "Uncategorized" bucket.
+  const categoryById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c] as const)),
+    [categories],
+  );
+
+  const spendingByCategory = useMemo(() => {
+    const map = new Map<string, { name: string; value: number; color: string }>();
     transactions.forEach((t) => {
       if (t.type !== 'expense') return;
       if (!t.occurred_on.startsWith(currentMonth)) return;
-      map.set(t.account_id, (map.get(t.account_id) ?? 0) + Number(t.amount));
+      const cat = t.category_id ? categoryById.get(t.category_id) : null;
+      const key = cat ? `cat-${cat.id}` : 'none';
+      const existing = map.get(key) ?? {
+        name: cat?.name ?? 'Uncategorized',
+        value: 0,
+        color: cat?.color ?? '#94a3b8',
+      };
+      existing.value += Number(t.amount);
+      map.set(key, existing);
     });
-    return Array.from(map.entries()).map(([accountId, total]) => ({
-      name: accountById.get(accountId)?.name ?? `Account #${accountId}`,
-      value: total,
-    }));
-  }, [transactions, currentMonth, accountById]);
+    return Array.from(map.values()).sort((a, b) => b.value - a.value);
+  }, [transactions, currentMonth, categoryById]);
 
   // Recent 5 transactions.
   const recentTransactions = useMemo(
@@ -308,11 +323,11 @@ export default function DashboardPage() {
               <CardHeader>
                 <CardTitle>Where your money went this month</CardTitle>
                 <CardDescription>
-                  Spending breakdown by account.
+                  Spending breakdown by category.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {spendingByAccount.length === 0 ? (
+                {spendingByCategory.length === 0 ? (
                   <p className="text-muted-foreground text-sm">
                     No expenses recorded this month yet.
                   </p>
@@ -321,7 +336,7 @@ export default function DashboardPage() {
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
-                          data={spendingByAccount}
+                          data={spendingByCategory}
                           dataKey="value"
                           nameKey="name"
                           cx="50%"
@@ -329,10 +344,13 @@ export default function DashboardPage() {
                           outerRadius={80}
                           label={(entry) => entry.name}
                         >
-                          {spendingByAccount.map((_, idx) => (
+                          {spendingByCategory.map((entry, idx) => (
                             <Cell
                               key={idx}
-                              fill={PIE_COLORS[idx % PIE_COLORS.length]}
+                              fill={
+                                entry.color ||
+                                PIE_COLORS[idx % PIE_COLORS.length]
+                              }
                             />
                           ))}
                         </Pie>

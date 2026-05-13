@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { LayoutDashboard, LogOut, Wallet, Receipt } from 'lucide-react';
+import { LayoutDashboard, LogOut, Wallet, Receipt, Tag } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { clearToken } from '@/lib/auth';
@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/accounts', label: 'Accounts', icon: Wallet },
   { href: '/transactions', label: 'Transactions', icon: Receipt },
+  { href: '/categories', label: 'Categories', icon: Tag },
 ];
 
 export function Nav() {

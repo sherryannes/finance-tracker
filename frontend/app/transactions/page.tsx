@@ -9,6 +9,8 @@ import { z } from 'zod';
 import {
   ArrowDownCircle,
   ArrowUpCircle,
+  Download,
+  Pencil,
   Plus,
   Trash2,
   Wallet,
@@ -19,6 +21,7 @@ import { isAuthenticated } from '@/lib/auth';
 import {
   ACCOUNT_TYPE_LABELS,
   type Account,
+  type Category,
   type Transaction,
   type TransactionType,
 } from '@/lib/types';
@@ -51,9 +54,25 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
+// Shared color palette for quick category creation.
+const PRESET_COLORS = [
+  '#0ea5e9',
+  '#f97316',
+  '#a855f7',
+  '#22c55e',
+  '#ec4899',
+  '#eab308',
+  '#06b6d4',
+  '#ef4444',
+  '#64748b',
+];
+
 // ---------- Form schema ----------
+const NO_CATEGORY = '__none__';
+
 const txnSchema = z.object({
   account_id: z.coerce.number().int().positive('Please select an account'),
+  category_id: z.string().optional(),
   type: z.enum(['income', 'expense']),
   amount: z.coerce
     .number({ message: 'Please enter a valid number' })
@@ -69,12 +88,15 @@ export default function TransactionsPage() {
   const router = useRouter();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [dialogOpen, setDialogOpen] = useState(false);
-
-  // Month filter: 'all' or 'YYYY-MM'
   const [monthFilter, setMonthFilter] = useState<string>('all');
+
+  // Dialog state: null = closed, 'new' = create mode, Transaction = edit mode
+  const [dialogState, setDialogState] = useState<null | 'new' | Transaction>(
+    null,
+  );
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -87,12 +109,14 @@ export default function TransactionsPage() {
   async function loadData() {
     try {
       setLoading(true);
-      const [txnRes, acctRes] = await Promise.all([
+      const [txnRes, acctRes, catRes] = await Promise.all([
         api.get<Transaction[]>('/api/transactions', { params: { limit: 500 } }),
         api.get<Account[]>('/api/accounts'),
+        api.get<Category[]>('/api/categories'),
       ]);
       setTransactions(txnRes.data);
       setAccounts(acctRes.data);
+      setCategories(catRes.data);
       setError(null);
     } catch (err) {
       setError('Failed to load transactions.');
@@ -109,7 +133,6 @@ export default function TransactionsPage() {
     try {
       await api.delete(`/api/transactions/${txnId}`);
       setTransactions((prev) => prev.filter((t) => t.id !== txnId));
-      // Reload accounts so balances reflect the deletion.
       const acctRes = await api.get<Account[]>('/api/accounts');
       setAccounts(acctRes.data);
     } catch (err) {
@@ -118,13 +141,15 @@ export default function TransactionsPage() {
     }
   }
 
-  // ---- Derived data ----
   const accountById = useMemo(
     () => new Map(accounts.map((a) => [a.id, a] as const)),
     [accounts],
   );
+  const categoryById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c] as const)),
+    [categories],
+  );
 
-  // Build a sorted list of months available in the data, for the filter dropdown.
   const months = useMemo(() => {
     const set = new Set<string>();
     transactions.forEach((t) => set.add(t.occurred_on.slice(0, 7)));
@@ -136,7 +161,6 @@ export default function TransactionsPage() {
     return transactions.filter((t) => t.occurred_on.startsWith(monthFilter));
   }, [transactions, monthFilter]);
 
-  // Sum income and expense for the current view.
   const summary = useMemo(() => {
     let income = 0;
     let expense = 0;
@@ -148,13 +172,62 @@ export default function TransactionsPage() {
     return { income, expense, net: income - expense };
   }, [filteredTransactions]);
 
-  // ---- Render ----
+  // ---------- CSV export ----------
+  function handleExportCSV() {
+    const headers = [
+      'date',
+      'type',
+      'amount',
+      'currency',
+      'account',
+      'category',
+      'note',
+    ];
+    const rows = filteredTransactions.map((t) => {
+      const account = accountById.get(t.account_id);
+      const category = t.category_id ? categoryById.get(t.category_id) : null;
+      return [
+        t.occurred_on,
+        t.type,
+        t.amount,
+        account?.currency ?? '',
+        account?.name ?? '',
+        category?.name ?? '',
+        t.note ?? '',
+      ];
+    });
+
+    const escape = (val: string | number) => {
+      const s = String(val);
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+
+    const csv = [headers, ...rows]
+      .map((row) => row.map(escape).join(','))
+      .join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const filename =
+      monthFilter === 'all'
+        ? 'transactions-all.csv'
+        : `transactions-${monthFilter}.csv`;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  // ---------- Render ----------
   return (
     <div className="flex flex-1 flex-col">
       <Nav />
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8 space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h1 className="text-2xl font-semibold">Transactions</h1>
@@ -163,10 +236,9 @@ export default function TransactionsPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Month filter */}
+          <div className="flex items-center gap-2 flex-wrap">
             <Select value={monthFilter} onValueChange={setMonthFilter}>
-              <SelectTrigger className="w-[180px]">
+              <SelectTrigger className="w-[160px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -179,30 +251,25 @@ export default function TransactionsPage() {
               </SelectContent>
             </Select>
 
-            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-              <DialogTrigger asChild>
-                <Button disabled={accounts.length === 0}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add transaction
-                </Button>
-              </DialogTrigger>
-              <AddTransactionDialog
-                accounts={accounts}
-                onSuccess={(newTxn, updatedAccount) => {
-                  setTransactions((prev) => [newTxn, ...prev]);
-                  setAccounts((prev) =>
-                    prev.map((a) =>
-                      a.id === updatedAccount.id ? updatedAccount : a,
-                    ),
-                  );
-                  setDialogOpen(false);
-                }}
-              />
-            </Dialog>
+            <Button
+              variant="outline"
+              onClick={handleExportCSV}
+              disabled={filteredTransactions.length === 0}
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Export CSV
+            </Button>
+
+            <Button
+              onClick={() => setDialogState('new')}
+              disabled={accounts.length === 0}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add transaction
+            </Button>
           </div>
         </div>
 
-        {/* Summary cards */}
         {!loading && filteredTransactions.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <SummaryCard
@@ -223,7 +290,6 @@ export default function TransactionsPage() {
           </div>
         )}
 
-        {/* Empty / loading / error states */}
         {loading && (
           <p className="text-muted-foreground">Loading transactions…</p>
         )}
@@ -263,18 +329,20 @@ export default function TransactionsPage() {
             </Card>
           )}
 
-        {/* Transactions list */}
         {!loading && filteredTransactions.length > 0 && (
           <Card>
             <CardContent className="p-0">
               <ul className="divide-y">
                 {filteredTransactions.map((txn) => {
                   const account = accountById.get(txn.account_id);
+                  const category = txn.category_id
+                    ? categoryById.get(txn.category_id)
+                    : null;
                   const isIncome = txn.type === 'income';
                   return (
                     <li
                       key={txn.id}
-                      className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/40 transition-colors"
+                      className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/40 transition-colors group"
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         {isIncome ? (
@@ -283,9 +351,23 @@ export default function TransactionsPage() {
                           <ArrowDownCircle className="h-5 w-5 text-rose-600 shrink-0" />
                         )}
                         <div className="min-w-0">
-                          <p className="font-medium truncate">
-                            {txn.note || (isIncome ? 'Income' : 'Expense')}
-                          </p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-medium truncate">
+                              {txn.note || (isIncome ? 'Income' : 'Expense')}
+                            </p>
+                            {category && (
+                              <span
+                                className="text-xs px-2 py-0.5 rounded-full font-medium"
+                                style={{
+                                  backgroundColor:
+                                    (category.color ?? '#94a3b8') + '20',
+                                  color: category.color ?? '#475569',
+                                }}
+                              >
+                                {category.name}
+                              </span>
+                            )}
+                          </div>
                           <p className="text-xs text-muted-foreground">
                             {txn.occurred_on}
                             {account && (
@@ -301,7 +383,7 @@ export default function TransactionsPage() {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2">
                         <span
                           className={`font-semibold tabular-nums ${
                             isIncome ? 'text-emerald-600' : 'text-rose-600'
@@ -314,15 +396,26 @@ export default function TransactionsPage() {
                             maximumFractionDigits: 2,
                           })}
                         </span>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => handleDelete(txn.id)}
-                          aria-label="Delete transaction"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        <div className="flex opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={() => setDialogState(txn)}
+                            aria-label="Edit transaction"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => handleDelete(txn.id)}
+                            aria-label="Delete transaction"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </div>
                     </li>
                   );
@@ -331,12 +424,41 @@ export default function TransactionsPage() {
             </CardContent>
           </Card>
         )}
+
+        {/* The dialog — controlled by dialogState. */}
+        <Dialog
+          open={dialogState !== null}
+          onOpenChange={(open) => !open && setDialogState(null)}
+        >
+          {dialogState !== null && (
+            <TransactionFormDialog
+              accounts={accounts}
+              categories={categories}
+              transaction={dialogState === 'new' ? null : dialogState}
+              onCategoryCreated={(newCat) =>
+                setCategories((prev) => [...prev, newCat])
+              }
+              onSuccess={async (savedTxn) => {
+                // Reload transactions + accounts to keep everything consistent.
+                const [txnRes, acctRes] = await Promise.all([
+                  api.get<Transaction[]>('/api/transactions', {
+                    params: { limit: 500 },
+                  }),
+                  api.get<Account[]>('/api/accounts'),
+                ]);
+                setTransactions(txnRes.data);
+                setAccounts(acctRes.data);
+                setDialogState(null);
+                void savedTxn;
+              }}
+            />
+          )}
+        </Dialog>
       </main>
     </div>
   );
 }
 
-// ---------- Summary card ----------
 function SummaryCard({
   title,
   value,
@@ -365,54 +487,96 @@ function SummaryCard({
   );
 }
 
-// ---------- Add Transaction Dialog ----------
-function AddTransactionDialog({
+// ---------- Transaction Form Dialog (create + edit) ----------
+function TransactionFormDialog({
   accounts,
+  categories,
+  transaction,
   onSuccess,
+  onCategoryCreated,
 }: {
   accounts: Account[];
-  onSuccess: (txn: Transaction, updatedAccount: Account) => void;
+  categories: Category[];
+  transaction: Transaction | null; // null = create, Transaction = edit
+  onSuccess: (txn: Transaction) => void;
+  onCategoryCreated: (cat: Category) => void;
 }) {
+  const isEdit = transaction !== null;
   const [serverError, setServerError] = useState<string | null>(null);
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const defaultValues: TxnFormData = transaction
+    ? {
+        account_id: transaction.account_id,
+        category_id: transaction.category_id
+          ? String(transaction.category_id)
+          : NO_CATEGORY,
+        type: transaction.type,
+        amount: Number(transaction.amount),
+        occurred_on: transaction.occurred_on,
+        note: transaction.note ?? '',
+      }
+    : {
+        account_id: accounts[0]?.id ?? 0,
+        category_id: NO_CATEGORY,
+        type: 'expense',
+        amount: 0,
+        occurred_on: today,
+        note: '',
+      };
 
   const {
     register,
     handleSubmit,
     watch,
     setValue,
-    reset,
     formState: { errors, isSubmitting },
   } = useForm<TxnFormData>({
     resolver: zodResolver(txnSchema),
-    defaultValues: {
-      account_id: accounts[0]?.id ?? 0,
-      type: 'expense',
-      amount: 0,
-      occurred_on: today,
-      note: '',
-    },
+    defaultValues,
   });
 
   const typeValue = watch('type');
   const accountIdValue = watch('account_id');
+  const categoryIdValue = watch('category_id') ?? NO_CATEGORY;
+
+  const matchingCategories = useMemo(
+    () => categories.filter((c) => c.type === typeValue),
+    [categories, typeValue],
+  );
 
   const onSubmit = async (data: TxnFormData) => {
     setServerError(null);
     try {
-      const res = await api.post<Transaction>('/api/transactions', data);
+      const payload = {
+        account_id: data.account_id,
+        type: data.type,
+        amount: data.amount,
+        occurred_on: data.occurred_on,
+        note: data.note || null,
+        category_id:
+          data.category_id && data.category_id !== NO_CATEGORY
+            ? Number(data.category_id)
+            : null,
+      };
 
-      // Re-fetch the affected account to get the new balance.
-      const acctRes = await api.get<Account>(
-        `/api/accounts/${data.account_id}`,
-      );
-
-      reset({ ...data, amount: 0, note: '' });
-      onSuccess(res.data, acctRes.data);
+      let saved: Transaction;
+      if (isEdit && transaction) {
+        const res = await api.patch<Transaction>(
+          `/api/transactions/${transaction.id}`,
+          payload,
+        );
+        saved = res.data;
+      } else {
+        const res = await api.post<Transaction>('/api/transactions', payload);
+        saved = res.data;
+      }
+      onSuccess(saved);
     } catch (err: unknown) {
       const message =
         (err as { response?: { data?: { detail?: string } } })?.response?.data
-          ?.detail ?? 'Failed to record transaction.';
+          ?.detail ?? `Failed to ${isEdit ? 'update' : 'record'} transaction.`;
       setServerError(String(message));
     }
   };
@@ -420,21 +584,27 @@ function AddTransactionDialog({
   return (
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Record a transaction</DialogTitle>
+        <DialogTitle>
+          {isEdit ? 'Edit transaction' : 'Record a transaction'}
+        </DialogTitle>
         <DialogDescription>
-          Pick an account, choose income or expense, and enter the amount.
+          {isEdit
+            ? 'Update the transaction below. Account balance will adjust automatically.'
+            : 'Pick an account, choose income or expense, and enter the amount.'}
         </DialogDescription>
       </DialogHeader>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-        {/* Type */}
         <div className="space-y-2">
           <Label>Type</Label>
           <div className="grid grid-cols-2 gap-2">
             <Button
               type="button"
               variant={typeValue === 'expense' ? 'default' : 'outline'}
-              onClick={() => setValue('type', 'expense' as TransactionType)}
+              onClick={() => {
+                setValue('type', 'expense' as TransactionType);
+                setValue('category_id', NO_CATEGORY);
+              }}
               className={
                 typeValue === 'expense'
                   ? 'bg-rose-600 hover:bg-rose-700 text-white'
@@ -447,7 +617,10 @@ function AddTransactionDialog({
             <Button
               type="button"
               variant={typeValue === 'income' ? 'default' : 'outline'}
-              onClick={() => setValue('type', 'income' as TransactionType)}
+              onClick={() => {
+                setValue('type', 'income' as TransactionType);
+                setValue('category_id', NO_CATEGORY);
+              }}
               className={
                 typeValue === 'income'
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
@@ -460,7 +633,6 @@ function AddTransactionDialog({
           </div>
         </div>
 
-        {/* Account */}
         <div className="space-y-2">
           <Label htmlFor="account_id">Account</Label>
           <Select
@@ -485,7 +657,61 @@ function AddTransactionDialog({
           )}
         </div>
 
-        {/* Amount */}
+        <div className="space-y-2">
+          <Label htmlFor="category_id">Category (optional)</Label>
+          <div className="flex gap-2">
+            <Select
+              value={categoryIdValue}
+              onValueChange={(v) => setValue('category_id', v)}
+            >
+              <SelectTrigger id="category_id" className="flex-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_CATEGORY}>No category</SelectItem>
+                {matchingCategories.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: c.color ?? '#94a3b8' }}
+                      />
+                      {c.name}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {/* Inline "+ create new category" */}
+            <Dialog open={quickAddOpen} onOpenChange={setQuickAddOpen}>
+              <DialogTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Create new category"
+                  title="Create new category"
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </DialogTrigger>
+              <InlineCreateCategoryDialog
+                defaultType={typeValue}
+                onCreated={(newCat) => {
+                  onCategoryCreated(newCat);
+                  setValue('category_id', String(newCat.id));
+                  setQuickAddOpen(false);
+                }}
+              />
+            </Dialog>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Need a new tag? Click <Plus className="inline h-3 w-3" /> to create
+            one without leaving this dialog.
+          </p>
+        </div>
+
         <div className="space-y-2">
           <Label htmlFor="amount">Amount</Label>
           <Input
@@ -501,7 +727,6 @@ function AddTransactionDialog({
           )}
         </div>
 
-        {/* Date */}
         <div className="space-y-2">
           <Label htmlFor="occurred_on">Date</Label>
           <Input
@@ -517,7 +742,6 @@ function AddTransactionDialog({
           )}
         </div>
 
-        {/* Note */}
         <div className="space-y-2">
           <Label htmlFor="note">Note (optional)</Label>
           <Input
@@ -534,7 +758,118 @@ function AddTransactionDialog({
 
         <DialogFooter>
           <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? 'Saving…' : 'Save transaction'}
+            {isSubmitting
+              ? isEdit
+                ? 'Saving…'
+                : 'Recording…'
+              : isEdit
+                ? 'Save changes'
+                : 'Save transaction'}
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
+// ---------- Inline "Quick Add Category" dialog ----------
+// Lives inside the Transaction dialog. Lets you create a category without
+// navigating away from the form you're filling out.
+function InlineCreateCategoryDialog({
+  defaultType,
+  onCreated,
+}: {
+  defaultType: TransactionType;
+  onCreated: (cat: Category) => void;
+}) {
+  const [name, setName] = useState('');
+  const [color, setColor] = useState(PRESET_COLORS[0]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Please enter a name');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.post<Category>('/api/categories', {
+        name: trimmed,
+        type: defaultType,
+        color,
+      });
+      // Reset for the next time the form opens.
+      setName('');
+      setColor(PRESET_COLORS[0]);
+      onCreated(res.data);
+    } catch (err: unknown) {
+      const message =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data
+          ?.detail ?? 'Failed to create category';
+      setError(String(message));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DialogContent className="max-w-sm">
+      <DialogHeader>
+        <DialogTitle>Quick add category</DialogTitle>
+        <DialogDescription>
+          New{' '}
+          <span
+            className={
+              defaultType === 'income' ? 'text-emerald-600' : 'text-rose-600'
+            }
+          >
+            {defaultType}
+          </span>{' '}
+          category — it&apos;ll be auto-selected once created.
+        </DialogDescription>
+      </DialogHeader>
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="quick-cat-name">Name</Label>
+          <Input
+            id="quick-cat-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Groceries"
+            autoFocus
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>Color</Label>
+          <div className="flex flex-wrap gap-2">
+            {PRESET_COLORS.map((c) => (
+              <button
+                type="button"
+                key={c}
+                onClick={() => setColor(c)}
+                className={`h-7 w-7 rounded-full border-2 transition-all ${
+                  color === c
+                    ? 'border-foreground scale-110'
+                    : 'border-transparent'
+                }`}
+                style={{ backgroundColor: c }}
+                aria-label={`Color ${c}`}
+              />
+            ))}
+          </div>
+        </div>
+
+        {error && <p className="text-sm text-destructive">{error}</p>}
+
+        <DialogFooter>
+          <Button type="submit" disabled={saving}>
+            {saving ? 'Creating…' : 'Create category'}
           </Button>
         </DialogFooter>
       </form>
